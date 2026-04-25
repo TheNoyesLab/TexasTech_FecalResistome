@@ -1,0 +1,1073 @@
+ ###############################################################################################
+## PROJECT: TexasTech_FecalResistome
+## Description: Collaborative project (UMN-TexasTech) that investigates changes on the fecal resistome and microbiome of cows with metritis treated with Ceftiofur
+## Project info: https://drive.google.com/drive/u/0/folders/0AJ3qNEG_LyaWUk9PVA
+## Samples: 
+### 1. Microbiome: /home/noyes046/data_delivery/umgc/2022-q3/220922_M04141_0254_000000000-KM8P8/Noyes_Project_051_ReSeq
+### 2. AMR enriched shotgun metagenomic sequencing: https://drive.google.com/drive/u/0/folders/1ZWIILIQGEWuLpdLl7LRhHj-ZkGbuL9nT
+## Initiated: 05/24/23
+## Last updated: 04/25/26
+###################################################################################################
+#
+##
+###  
+####
+##### 1. Microbiome
+####
+###
+##
+#
+# path for reading sequence data: /home/noyes046/data_delivery/umgc/2022-q3/220922_M04141_0254_000000000-KM8P8/Noyes_Project_051_ReSeq
+#
+#
+# 0. Create tmux session
+	tmux new -s texas 
+	# tmux a -t texas #To attach, 
+	# ctrl+b and press d #To detach 
+# 1. Install dada2 package (Source: https://www.metagenomics.wiki/tools/16s/dada2/conda)
+## 1.1. create conda environment 
+## Since I have conda I do not need to install it, but if you have problems installing conda, just check the source of step 1 (up) 
+	mamba create -n dada2v1.16
+	mamba activate dada2v1.16
+	mamba install -c conda-forge -c bioconda -c defaults --override-channels bioconductor-dada2=1.16 # -c defaults does not work anymore!!!!
+		mamba create -n dada2v1.20
+		mamba activate dada2v1.20
+		mamba install -c conda-forge -c bioconda -c defaults --override-channels bioconductor-dada2=1.20
+	# proceed? y
+	# make sure you have the dada2: mamba info --envs
+## 1.2. Installing the package in R 
+	# I am not sure why I did not need to install dada2 in R. I just activated the "dada2v1.16" environment and hit "R", called the package and it worked O_O
+		mamba activate dada2v1.16
+	# create folder for project
+		mkdir TexasTech	
+	# Start R within the conda environment
+		R
+	# This will activate an R version 4.0.5 that apparently is the best for dada2
+	# Test if dada2 is running within R 
+		library(dada2); packageVersion("dada2")
+	# If working it should output "[1] ‘1.16.0’"
+# REMEMBER ABOUT COMPATIBILITY:
+# R VERSION 4.0.XXX WORKS WITH BIOCONDUCTOR 3.11 AND DADA2 1.16
+
+####### REMOVE PRIMERS #########
+#
+# I did it with RStudio in my PC. Check "TexasTech_primer_remove.Rmd" for more info
+# I just copied the folder "cutadapt" that has all the sequences without primers to next path: "~TexasTech/cutadapt"
+#
+####### TRIMMING TO A GIVEN SEQUENCE LENGHT #######
+# START R and set working directory
+	tmux a -t texas
+	mamba activate dada2v1.16
+	R 
+	# sanity check
+		library(dada2); packageVersion("dada2") 
+	# set working directory
+		setwd("~/TexasTech") # getwd() # to check
+# 2. Input cutadapt-ed files
+	# define path.cut
+	path.cut <- file.path("~/TexasTech/cutadapt")
+	# Forward and reverse fastq filenames have the format:
+	cutFs <- sort(list.files(path.cut, pattern = "_R1_001.fastq.gz", full.names = TRUE))
+	cutRs <- sort(list.files(path.cut, pattern = "_R2_001.fastq.gz", full.names = TRUE))
+	# Extract sample names, assuming filenames have format:
+	get.sample.name <- function(fname) strsplit(basename(fname), "_")[[1]][1]
+	sample.names <- unname(sapply(cutFs, get.sample.name))
+	head(sample.names)
+# 3. Inspect read quality 
+	# Please note that I obtained my plots for quality inspection on RSTUDIO with the following command:
+	# STEP 1: First the forward reads
+	plotQualityProfile(cutFs[1:50], aggregate = T)
+	# STEP 2: Then Reverse reads
+	plotQualityProfile(cutRs[1:50], aggregate = T)
+	# I am not sure how to export figures from R in Terminal but you can check it out here (spanish): https://r-coder.com/exportar-graficos-r/
+# 4. Filter and trim
+	# STEP 1: Create directory for new files
+	# Place filtered files in filtered/ subdirectory
+	filtFs <- file.path(path.cut, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+	filtRs <- file.path(path.cut, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+	# STEP 2: Filter and trim Fw to 280 bp and Rv to 210 bp (enough to overlap the ~444 bp size of V4 gene), with an increased error rate = 3,3
+	out <- filterAndTrim(cutFs, filtFs, cutRs, filtRs, truncLen=c(280,210),
+                              maxN=0, maxEE=c(3,3), truncQ=2, rm.phix=TRUE,
+                              compress=TRUE, multithread=TRUE)
+	head(out)
+	# STEP 3: PLooting to see how nice are your trimms 
+	plotQualityProfile(filtFs[1:50], aggregate = T)
+	plotQualityProfile(filtRs[1:50], aggregate = T)
+
+###### DENOISING #######
+#
+# 5. Learn error rates
+	# STEP 1: Forward first
+	errF <- learnErrors(filtFs, multithread=TRUE, randomize = TRUE)
+	# output: 112659960 total bases in 402357 reads from 3 samples will be used for learning the error rates.
+	# STEP 2: Reverse then
+	errR <- learnErrors(filtRs, multithread=TRUE, randomize = TRUE)
+	# output: 111717900 total bases in 531990 reads from 6 samples will be used for learning the error rates.
+	# STEP 3: PLot your errors
+	plotErrors(errF, nominalQ=TRUE)
+	plotErrors(errR, nominalQ=TRUE)
+# 6. Dereplication
+	# FORWARD
+	derepFs <- derepFastq(filtFs, verbose=TRUE)
+	# REVERSE
+	derepRs <- derepFastq(filtRs, verbose=TRUE)
+	# Name the derep-class objects by the sample names
+	names(derepFs) <- sample.names
+	names(derepRs) <- sample.names
+# 7. Sample inference: DADA IT!
+	# FORWARD
+	dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
+	# REVERSE
+	dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+	# Then, INSPECT!
+	dadaFs[[1]]
+	dadaRs[[1]]
+# 8. Merge pair reads 
+	mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+	# Inspect the merger data.frame from the first sample
+	head(mergers[[1]])
+# 9. Construct sequence table
+	# STEP 1
+	seqtab <- makeSequenceTable(mergers)
+	# STEP 2
+	dim(seqtab)
+	# STEP 3: Inspect distribution of sequence lengths
+	table(nchar(getSequences(seqtab)))
+## 9.1. Shorting sequence table to 402-431 bp size
+	# Getting sequences only 402 to 431 bp size
+	seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 402:431]
+	# Double-cheking
+	dim(seqtab2)
+	# I missed (8706-7977 = 729) sequences that were out of size range allowed for V4 gene =252bp
+	table(nchar(getSequences(seqtab2)))
+# 10. Remove chimera sequences
+# I am not completely sure what they are but we need to remove them
+# We are starting with 52780 sequences as inputs, lets see how many of them are quimeras
+	seqtab.nochim2 <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+	# Identified 33063 bimeras out of 52780 input sequences
+	# This will tell us how many non-chimera sequences remain
+	dim(seqtab.nochim2)
+	# 19717 sequences remained
+	# this formula will tell us what is the percentage of non-chimera sequences that remain,
+	# So we can not the percentage of chimera sequences we removed
+	sum(seqtab.nochim2)/sum(seqtab2)
+	# [1] 0.9430187
+# 11. Finally check how many reads have you lost in the whole process, starting with the without-primers input reads (STEP 6) to the final chimera removal (STEP 14)
+	getN <- function(x) sum(getUniques(x))
+	track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim2))
+	# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+	colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+	rownames(track) <- sample.names
+	head(track) 
+# 12. Save in your working directory your "track" table as a summary table in a "tsv format" that Excel can read
+	write.table(track, "read-count-tracking.tsv", quote=FALSE, sep="\t", col.names=NA)
+	
+####### ASSING TAXONOMY #######
+# 
+# 13. ASSIGN TAXONOMY: Now you will give a name to your ASVs
+# For this step you will need to have 2 databases: SILVA genus (~/Rumen_16S/16S_database/silva_nr99_v138.1_train_set.fa.gz) and SILVA species (~/Rumen_16S/16S_database/silva_species_assignment_v138.1.fa.gz)
+# Look this issue for more info on which database you should use: https://github.com/benjjneb/dada2/issues/1319
+# You can download both databases in the most updated version from: https://zenodo.org/record/4587955#.YpZOOGiZPIU
+	# STEP 1: Assign until genus level
+	taxa <- assignTaxonomy(seqtab.nochim2, "~/TexasTech/silva_nr99_v138.1_train_set.fa.gz", multithread=TRUE)
+	# STEP 2: Assign until species level
+	taxa <- addSpecies(taxa, "~/TexasTech/silva_species_assignment_v138.1.fa.gz")
+#
+####### MODIFIED ASSIGN TAXONOMY ON 01/16/26 IN LOCAL COMPUTER: Re-run with new SILVA database 138.2, released on July 11, 2024 #######
+	# Download SILVA 138.2 database from: https://zenodo.org/records/14169026
+	# Download: silva_nr99_v138.2_toGenus_trainset.fa.gz & silva_v138.2_assignSpecies.fa.gz
+	# Place the databases in a new folder which I will use as output folder for this re-analysis:
+		/Users/gerardodiaz/Desktop/Gerardo/UMN/Side_projects/TexasTech_resistome/Microbiome_SILVA138_2
+	# Run R in Local computer because denoising process was already done and the downstream process can be done with low computational capacity
+	# Install required packages, set up working directory and all required to run DADA2 in local computer
+		setwd("/Users/gerardodiaz/Desktop/Gerardo/UMN/Side_projects/TexasTech_resistome")
+		if (!require("BiocManager", quietly = TRUE))
+		install.packages("BiocManager")
+		BiocManager::install(version = "3.20")
+		install.packages("Rcpp")
+		BiocManager::install("dada2", ask = FALSE, update = TRUE)
+		library(dada2); packageVersion("dada2") 
+		# You should see [1] ‘1.34.0’
+	# Then:
+	# STEP 1: load "seqtab.nochim2" that was saved as "otu_table.rds" 
+		seqtab.nochim2 <- readRDS("otu_table.rds")
+	# STEP 2: Assign until genus level
+		taxa <- assignTaxonomy(seqtab.nochim2, "~/Microbiome_SILVA138_2/silva_nr99_v138.2_toGenus_trainset.fa.gz", multithread=TRUE)
+	# NOTE I did not complete species Assignment because it ate all my local 16GB RAM and couldnt finish species level classification
+
+
+####### EXPORT OUTPUT #######
+#
+# 14. Extracting data from dada2 analysis. You may have: FASTA FILE (with the 16S sequences of each ASV), a count table (ASV table) and a taxonomy table (Tax Table)
+	# giving our seq headers more manageable names (ASV_1, ASV_2...)
+	asv_seqs <- colnames(seqtab.nochim2)
+	asv_headers <- vector(dim(seqtab.nochim2)[2], mode="character")
+	for (i in 1:dim(seqtab.nochim2)[2]) {
+	asv_headers[i] <- paste(">ASV", i, sep="_")
+	}
+	# making and writing out a fasta of our final ASV seqs:
+	asv_fasta <- c(rbind(asv_headers, asv_seqs))
+	write(asv_fasta, "ASVs.fa")
+	# count table (ASV table):
+	asv_tab <- t(seqtab.nochim2)
+	row.names(asv_tab) <- sub(">", "", asv_headers)
+	write.table(asv_tab, "ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+	# tax table:
+	write.table(taxa, "taxa.tsv", sep = "\t", quote=F, col.names=NA)
+	#SAVING RDS OBJECTS (RDS) AND WORKSPACE (RData)
+	saveRDS(seqtab.nochim2, file = "otu_table.rds")
+	saveRDS(taxa, file = "taxa_table.rds")
+	save.image(file = "TexasTech.RData")
+
+
+
+## ADDRESS FOR FILES TARGET-ENRICHED METAGENOMIC 
+	/home/noyes046/data_delivery/umgc/2022-q2/220427_A00223_0822_AHJWF3DSX3/Noyes_Project_054
+
+#
+##
+###
+####
+##### CONTIG ANALYSIS
+####
+###
+##
+#
+# Raw reads: /scratch.global/diazo005/texas/Noyes_Project_054
+# Core: agate acl97
+# working directory: /scratch.global/diazo005/texas
+# path for host genome (Bos Taurus): /common/bioref/ensembl/main/Bos_taurus-110/ARS-UCD1.2/seq
+#
+# HOST READS DECONTAMINATION
+#
+# Create tmux
+	tmux new -s texas
+# Loading shared module
+	module load AMR++/3.0.6
+# Cloning the AMR++ repository
+	git clone https://github.com/Microbial-Ecology-Group/AMRplusplus.git   # Will download in current working directory
+# Navigate into repo (if that is where you want to run it from)
+	cd /scratch.global/diazo005/texas/AMRplusplus
+# Run host removal subworkflow 
+	nextflow run main_AMR++.nf -profile local -w work_temp --pipeline standard_AMR --reads "/scratch.global/diazo005/texas/Noyes_Project_054/*_R{1,2}_001.fastq.gz" --host /common/bioref/ensembl/main/Bos_taurus-110/ARS-UCD1.2/seq --threads 40 --output output_texas --snp Y -resume
+# ERROR 1
+	  /// MultiQC 🔍 | v1.14
+
+[2024-05-03 21:43:51,281] multiqc                                            [DEBUG  ]  This is MultiQC v1.14
+[2024-05-03 21:43:51,334] multiqc                                            [DEBUG  ]  Loading config settings from: multiqc_config.yaml
+[2024-05-03 21:43:51,334] multiqc                                            [DEBUG  ]  New config: {'title': 'AMR++ Bioinformatic pipeline', 'subtitle': 'A pipeline meant to aid in the analysis of raw sequencing r
+eads to characterize the profile of antimicrobial resistance genes, or resistome.', 'report_header_info': [{'Contact E-mail': 'meglab.metagenomics@gmail.com'}, {'Application Type': 'AMR++'}, {'Project Type': 'FastQ
+C analysis'}], 'custom_logo_url': 'https://www.meglab.org/', 'custom_logo_title': 'Microbial Ecology Group'}
+[2024-05-03 21:43:51,335] multiqc                                            [DEBUG  ]  Found command line config: {'max_table_rows': 3000}
+[2024-05-03 21:43:51,335] multiqc                                            [DEBUG  ]  New config: {'max_table_rows': 3000}
+[2024-05-03 21:43:51,335] multiqc                                            [DEBUG  ]  Command used: /home/noyes046/shared/tools/pipeline.install/AMR++/3.0.6/2023.08.01/bin/multiqc -v data1 data10 data11 data12 da
+ta13 data14 data15 data16 data17 data18 data19 data2 data20 data21 data22 data23 data24 data25 data26 data27 data28 data29 data3 data30 data31 data32 data33 data34 data35 data36 data37 data38 data39 data4 data40 da
+ta41 data42 data43 data44 data45 data46 data47 data48 data49 data5 data50 data51 data52 data53 data54 data55 data56 data57 data58 data59 data6 data60 data61 data62 data63 data64 data65 data66 data67 data68 data69 d
+ata7 data70 data71 data72 data73 data74 data75 data76 data77 data78 data79 data8 data80 data81 data82 data83 data84 data85 data86 data87 data88 data89 data9 data90 data91 --interactive -f --cl-config max_table_rows
+: 3000
+[2024-05-03 21:43:52,080] multiqc                                            [WARNING]  MultiQC Version v1.21 now available!
+[2024-05-03 21:43:52,081] multiqc                                            [DEBUG  ]  Working dir : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36
+[2024-05-03 21:43:52,081] multiqc                                            [DEBUG  ]  Template    : default
+[2024-05-03 21:43:52,081] multiqc                                            [DEBUG  ]  Running Python 3.9.15 | packaged by conda-forge | (main, Nov 22 2022, 08:45:29)  [GCC 10.4.0]
+[2024-05-03 21:43:52,081] multiqc                                            [INFO   ]  Report title: AMR++ Bioinformatic pipeline
+[2024-05-03 21:43:52,081] multiqc                                            [DEBUG  ]  Analysing modules: custom_content, ccs, ngsderive, purple, conpair, lima, peddy, somalier, methylQA, mosdepth, phantompeakqual
+tools, qualimap, preseq, hifiasm, quast, qorts, rna_seqc, rockhopper, rsem, rseqc, busco, bustools, goleft_indexcov, gffcompare, disambiguate, supernova, deeptools, sargasso, verifybamid, mirtrace, happy, mirtop, s
+ambamba, gopeaks, homer, hops, macs2, theta2, snpeff, gatk, htseq, bcftools, featureCounts, fgbio, dragen, dragen_fastqc, dedup, pbmarkdup, damageprofiler, biobambam2, jcvi, mtnucratio, picard, vep, sentieon, prokk
+a, qc3C, nanostat, samblaster, samtools, sexdeterrmine, eigenstratdatabasetools, bamtools, jellyfish, vcftools, longranger, stacks, varscan2, snippy, umitools, bbmap, bismark, biscuit, diamond, hicexplorer, hicup,
+hicpro, salmon, kallisto, slamdunk, star, hisat2, tophat, bowtie2, bowtie1, cellranger, snpsplit, odgi, pangolin, nextclade, humid, kat, leehom, adapterRemoval, bbduk, clipandmerge, cutadapt, flexbar, kaiju, kraken
+, malt, motus, trimmomatic, sickle, skewer, sortmerna, biobloomtools, fastq_screen, afterqc, fastp, fastqc, filtlong, prinseqplusplus, pychopper, porechop, pycoqc, minionqc, anglerfish, multivcfanalyzer, clusterflo
+w, checkqc, bcl2fastq, bclconvert, interop, ivar, flash, seqyclean, optitype, whatshap
+[2024-05-03 21:43:52,081] multiqc                                            [DEBUG  ]  Using temporary directory for creating report: /tmp/tmpo9q6bp7o
+[2024-05-03 21:43:52,405] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data1
+[2024-05-03 21:43:52,405] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data10
+[2024-05-03 21:43:52,405] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data11
+[2024-05-03 21:43:52,405] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data12
+[2024-05-03 21:43:52,405] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data13
+[2024-05-03 21:43:52,405] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data14
+[2024-05-03 21:43:52,405] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data15
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data16
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data17
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data18
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data19
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data2
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data20
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data21
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data22
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data23
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data24
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data25
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data26
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data27
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data28
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data29
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data3
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data30
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data31
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data32
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data33
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data34
+[2024-05-03 21:43:52,406] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data35
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data36
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data37
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data38
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data39
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data4
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data40
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data41
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data42
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data43
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data44
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data45
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data46
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data47
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data48
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data49
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data5
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data50
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data51
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data52
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data53
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data54
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data55
+[2024-05-03 21:43:52,407] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data56
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data57
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data58
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data59
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data6
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data60
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data61
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data62
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data63
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data64
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data65
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data66
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data67
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data68
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data69
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data7
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data70
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data71
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data72
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data73
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data74
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data75
+[2024-05-03 21:43:52,408] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data76
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data77
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data78
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data79
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data8
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data80
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data81
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data82
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data83
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data84
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data85
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data86
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data87
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data88
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data89
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data9
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data90
+[2024-05-03 21:43:52,409] multiqc                                            [INFO   ]  Search path : /scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdabc87c010907771dcb36/data91
+|         searching | ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 364/364
+[2024-05-03 21:52:03,007] multiqc                                            [DEBUG  ]  Summary of files that were skipped by the search: [skipped_module_specific_max_filesize: 2002] // [skipped_no_match: 182]
+Duplicate key in file '/home/noyes046/diazo005/.config/matplotlib/matplotlibrc', line 2 ('backend: agg')
+[2024-05-03 21:52:07,055] multiqc.plots.bargraph                             [DEBUG  ]  Using matplotlib version 3.5.3
+[2024-05-03 21:52:07,105] multiqc.plots.linegraph                            [DEBUG  ]  Using matplotlib version 3.5.3
+[2024-05-03 21:52:07,161] multiqc                                            [DEBUG  ]  No samples found: custom_content
+[2024-05-03 21:52:36,013] multiqc.modules.fastqc.fastqc                      [INFO   ]  Found 182 reports
+[2024-05-03 21:52:37,609] multiqc                                            [INFO   ]  Compressing plot data
+[2024-05-03 21:52:39,950] multiqc                                            [INFO   ]  Report      : multiqc_report.html
+[2024-05-03 21:52:39,951] multiqc                                            [INFO   ]  Data        : multiqc_data
+[2024-05-03 21:52:39,951] multiqc                                            [DEBUG  ]  Moving data file from '/tmp/tmpo9q6bp7o/multiqc_data' to '/scratch.global/diazo005/texas/AMRplusplus/work_temp/de/a42af3e7fdab
+c87c010907771dcb36/multiqc_data'
+[2024-05-03 21:52:40,904] multiqc                                            [INFO   ]  MultiQC complete
+mv: cannot stat 'AMR-Bioinformatic-pipeline_multiqc_report_data/multiqc_general_stats.txt': No such file or directory
+(END)
+
+# Solution: I changed the name of ~/.config/matplotlib/matplotlibrc to ~/.config/matplotlib/matplotlibrc_2 to avoid conflict due to duplicate keys on matplotlib
+
+
+# Second try in '/scratch.global/diazo005/texas/second/AMRplusplus'
+	nextflow run main_AMR++.nf -profile local -w work_temp --pipeline trim_qc --reads "/scratch.global/diazo005/texas/Noyes_Project_054/*_R{1,2}_001.fastq.gz" --host /common/bioref/ensembl/main/Bos_taurus-110/ARS-UCD1.2/seq --threads 40 --output output_texas --snp Y -resume
+# Output
+N E X T F L O W  ~  version 23.04.1
+WARN: It appears you have never run this project before -- Option `-resume` is ignored
+Launching `main_AMR++.nf` [agitated_galileo] DSL2 - revision: f6bfe39b99
+ A M R + +    N F   P I P E L I N E
+ ===================================
+ reads being analyzed : /scratch.global/diazo005/texas/Noyes_Project_054/*_R{1,2}_001.fastq.gz
+ output folder        : output_texas
+
+===================================
+Running the trim_qc subworkflow
+===================================
+
+executor >  local (92)
+[c8/ba14be] process > FASTQ_TRIM_WF:runqc (84612D14TT63_S77)       [100%] 91 of 91 ✔
+[08/2878d7] process > FASTQ_TRIM_WF:QCstats (Make QC summary file) [100%] 1 of 1 ✔
+Waiting for file transfers to complete (2 files)
+Pipeline completed!
+Started at  2024-05-04T09:35:33.671391881-05:00
+Finished at 2024-05-04T19:56:28.287718240-05:00
+Time elapsed: 10h 20m 55s
+Execution status: OK
+Completed at: 04-May-2024 19:56:28
+Duration    : 10h 20m 54s
+CPU hours   : 40.5
+Succeeded   : 92
+
+# Then
+	nextflow run main_AMR++.nf -profile local -w work_temp_2 --pipeline rm_host --reads "/scratch.global/diazo005/texas/second/AMRplusplus/output_texas/QC_trimming/Paired/*.{1,2}P.fastq.gz" --host /common/bioref/ensembl/main/Bos_taurus-110/ARS-UCD1.2/seq --threads 40 --output output_texas_2 -resume
+# It worked!!
+
+N E X T F L O W  ~  version 23.04.1
+Launching `main_AMR++.nf` [romantic_swanson] DSL2 - revision: f6bfe39b99
+ A M R + +    N F   P I P E L I N E
+ ===================================
+ reads being analyzed : /scratch.global/diazo005/texas/second/AMRplusplus/output_texas/QC_trimming/Paired/*.{1,2}P.fastq.gz
+ output folder        : output_texas_2
+
+===================================
+Running the rm_host subworkflow
+===================================
+
+executor >  local (92)
+[b9/57be90] process > FASTQ_RM_HOST_WF:bwa_rm_contaminant_fq (84653D5TT68_S45) [100%] 91 of 91 ✔
+[07/084afe] process > FASTQ_RM_HOST_WF:HostRemovalStats (null)                 [100%] 1 of 1 ✔
+Waiting for file transfers to complete (2 files)
+Pipeline completed!
+Started at  2024-05-04T20:59:52.256187045-05:00
+Finished at 2024-05-05T03:53:28.742174543-05:00
+Time elapsed: 6h 53m 36s
+Execution status: OK
+Completed at: 05-May-2024 03:53:28
+Duration    : 6h 53m 36s
+CPU hours   : 27.4
+Succeeded   : 92
+
+# FINAL OUTPUT
+	/scratch.global/diazo005/texas/second/AMRplusplus/output_texas_2/HostRemoval/NonHostFastq
+
+#
+##
+###
+####
+##### RUNNING MGIP
+####
+###
+##
+#
+# Source: https://github.umn.edu/singe259/mgip
+
+# Input high-quality non-host reads: /scratch.global/diazo005/texas/second/AMRplusplus/output_texas_2/HostRemoval/NonHostFastq 
+# working directory: /scratch.global/diazo005/texas/mgip
+# 
+# Key files: 'pipeline.py' 'runtime.py' 'runtimeDir.py'
+#
+# 0. Copy input non-host reads and copy/download script
+	cd /scratch.global/diazo005/texas
+	git clone https://github.umn.edu/singe259/mgip # provide user and password from your github umn account
+	cd mgip
+	cp -r /scratch.global/diazo005/texas/second/AMRplusplus/output_texas_2/HostRemoval/NonHostFastq .
+	cd /scratch.global/diazo005/texas/mgip/NonHostFastq
+	gunzip *
+#
+# 1. Install IDBA: https://github.com/loneknightpy/idba
+	# Not needed because it is already installed in: '/home/noyes046/shared/tools/idba'
+
+# 2. Install BLAT 
+	# Not needed because it is available as module in the server. The mgip script will 'module load' as part of its workflow
+
+# 3. Install Kraken 2
+	# Not needed because is available as module in the server. The mgip script will 'module load' as part of its workflow
+
+# 4. Set the tool paths in the file 'config.txt'
+	cd /scratch.global/diazo005/texas/mgip
+	nano config.txt # write the following:
+		/home/noyes046/shared/tools/idba/
+		/scratch.global/diazo005/texas/AMRplusplus/data/amr/megares_database_v3.00.fasta
+		/home/noyes046/shared/databases/kraken_rumen_db
+
+	'ctrl + X', Yes, 'Enter' # to save changes in 'config.txt'
+
+# 5. Move to the folder where the pipeline and runtime files are stored and run it
+	cd /scratch.global/diazo005/texas/mgip
+	module load python3
+ 	python3 runtimeDir.py -s ./results/ -c /scratch.global/diazo005/texas/mgip/NonHostFastq/ ./config.txt
+
+Traceback (most recent call last):
+  File "runtime.py", line 5, in <module>
+    from Bio import SearchIO, SeqIO, SeqRecord, Seq
+ModuleNotFoundError: No module named 'Bio'
+
+# Solution
+	module load biopython 
+# and then run python script 
+ 	python3 runtimeDir.py -s ./results/ -c /scratch.global/diazo005/texas/mgip/NonHostFastq/ ./config.txt >> File_name.log 2>&1 
+
+
+# 06/28/24 UPDATE ON FAILED KRAKEN RUN: I followed directions of Jacob and Modified the 3 lines of 'runtime.py' script:
+# From:
+	...
+    # p.add_step(run_kraken)
+    # p.add_step(parse_kraken)
+    # p.add_step(gen_output)
+	...
+# To:
+    ...
+	p.add_step(run_kraken)
+    p.add_step(parse_kraken)
+    p.add_step(gen_output)
+	...
+# Then I run changing the '-c' flag to '-u' flag so MGIP can run kraken with IDBA output:
+	module load biopython 
+ 	python3 runtimeDir.py -s ./results/ -u ./results/ ./config.txt >> File_name.log 2>&1 
+
+# AFTER A WHILE I ANALIZED THE CONTIGS HARBORING CMY (AND BETALACTAMASE) THAT WERE GENERATED WITH MGIP PIPELINE.
+# Scripts are available in the "mgip_results" folder. I ended up with an excel file "contig_analysis_CMY.xlsx" (and "contig_analysis_betalactams.xlsx") I used to create a ps object and run the analysis in R
+# Since the dataset was not too big, some of the formatting was made by hand in excel and no reproducible scripts are available.
+#
+# 10/23/24 UPDATE: After learning which contigs harbor a CMY and BETALACTAMASE genes, I decided to extract them as in individual fasta files to use them as input to look for mobile genetic elements.
+# I copied all the "contigs.fa" files contained in each sample folder:
+	cd /scratch.global/diazo005/results # I re-copied the results folder from tier 2
+	for dir1 in */ ; do
+		# Loop through each second-level directory
+		for dir2 in "$dir1"*/ ; do
+			# Check if contig.fa exists in the second-level directory
+			if [ -f "${dir2}contig.fa" ]; then
+				# Extract the name of the first-level directory (without the trailing slash)
+				parent1=$(basename "$dir1")
+				
+				# Copy the file to the root directory with the new name
+				cp "${dir2}contig.fa" "${parent1}_contig.fa"
+			fi
+		done
+	done
+
+# I moved the files to a directory called "contigs"
+	cd /scratch.global/diazo005
+	mkdir contigs
+	for file in *.fa; do
+		if [ -f "$file" ]; then
+			# Move the file one level up (..) preserving the name
+			mv "$file" ../contigs
+		fi
+	done
+# Within the "contigs" folder, I changed the names of all files to make the processing easier
+	for file in *.fa; do
+		# Extract the base name (everything before the first underscore)
+		new_name=$(echo "$file" | cut -d'_' -f1)
+		
+		# Rename the file, adding the .fa extension to the new name
+		mv "$file" "${new_name}.fa"
+	done
+
+# The list of contigs that contain CMY genes is in "classified_CMY.txt" and "unclassified_CMY.txt". 
+# "classified_CMY.txt" was copied an renamed "classified_CMY_formatted" (contains 46 contig codes), and "unclassified_CMY.txt" as "unclassified_CMY_formatted.txt" (contains 131 contig codes).
+# I manually formatted those 2 txt files in excel so they can have the sample name (.fa) in column 1 and contig code (contig-100_...) in column 2.
+# To extract the classified contigs from the big fasta files, I copied all big fasta files to a new directory and get the "extract_sequences.sh" and the "classified_CMY_formatted.txt" files
+	mkdir CMY_contigs
+	cd /scratch.global/diazo005/ALL_contigs 
+	cp * ../CMY_contigs
+	put extract_sequences.sh
+	put classified_CMY_formatted.txt
+# I ran the sh script after changing the name of the txt file to list.txt so I fits better in the script
+	mv classified_CMY_formatted.txt list.txt
+	chmod 777 extract_sequences.sh
+	./extract_sequences.sh
+# I moved deleted the big fa files and just kept the new extracted fa contig files
+	mkdir borrar
+	mv *_*.fa borrar/
+	cd /scratch.global/diazo005/CMY_contigs
+	rm *.fa 
+	mv borrar/* .
+	rm -r borrar
+# I DID THE SAME FOR THE UNCLASSIFIED CMY CONTIGS ("unclassified_CMY.txt")
+# To note: the extract_sequences.sh contains:
+
+#!/bin/bash
+
+# Input: list.txt (first column: file name, second column: first word of header)
+list_file="list.txt"
+
+# Loop through each line of the list
+while IFS=$'\t' read -r fa_file header_keyword; do
+    # Trim leading/trailing spaces and handle special characters
+    fa_file=$(echo "$fa_file" | tr -d '\r' | xargs)
+    header_keyword=$(echo "$header_keyword" | tr -d '\r' | xargs)
+    
+    # Check if the .fa file exists
+    if [[ -f "$fa_file" ]]; then
+        # Use awk to search for the header that starts with the keyword (e.g., >contig-100)
+        awk -v keyword=">$header_keyword" '
+        BEGIN {found=0} 
+        /^>/ {if(found) exit; if($1 ~ keyword) {found=1; print $0}} 
+        found && !/^>/ {print}' "$fa_file" > "${fa_file%.fa}_${header_keyword}.fa"
+        
+        # Check if a sequence was found and extracted
+        if [[ -s "${fa_file%.fa}_${header_keyword}.fa" ]]; then
+            echo "Extracted sequence from $fa_file with header starting with '$header_keyword' to ${fa_file%.fa}_${header_keyword}.fa"
+        else
+            echo "No matching sequence found in $fa_file for header starting with '$header_keyword'."
+            # Remove empty file
+            rm -f "${fa_file%.fa}_${header_keyword}.fa"
+        fi
+    else
+        echo "File $fa_file not found."
+    fi
+done < "$list_file"
+
+# To note 2: For some reason the last row of the txt file is not read and I needed to create my own fa file for the last sample of the list, by simply moving to the assigned contig
+# and copy the header and the sequence to a new XXX.fa file.
+
+# My final folder of fa contigs were copied to my local machine:
+	# CMY_contigs (46 fa contig files)
+	# CMY_unclass_contigs (131 fa contig files)
+
+#
+##
+###
+####
+##### RUNNING GENOMAD
+####
+###
+##
+#
+# REFERENCE: https://github.com/apcamargo/genomad?tab=readme-ov-file
+# FULL GENOMAD's DESCRIPTION: https://portal.nersc.gov/genomad/ 
+# I copied the folder with the contigs from my local machine to the server using sftp protocol:
+	lcd /Users/gerardodiaz/Desktop/Gerardo/UMN/Side_projects/TexasTech_resistome/mgip_results
+	cd /scratch.global/diazo005
+	put CMY_contigs
+	put CMY_unclass_contigs
+# creating a mew tmux session for genomad run:
+	tmux new -s texas
+# I installed GENOMAD using mamba and activated it:
+	mamba create -n genomad -c conda-forge -c bioconda genomad
+	mamba activate genomad
+# I created an specific folder for genomad in my scratch global space
+	cd /scratch.global/diazo005
+	mkdir genomad
+# downloaded the genomad database there:
+	cd /scratch.global/diazo005/genomad
+	genomad download-database .
+# concat all the .fa files (contigs) in my folders:
+	cd /scratch.global/diazo005/CMY_contigs
+	cat *.fa > all_CMY_contigs.fa
+	cd /scratch.global/diazo005/CMY_unclass_contigs
+	cat *.fa > all_CMY_unclass_contigs.fa
+# run genomad!
+	cd /scratch.global/diazo005/genomad
+	genomad end-to-end --cleanup --splits 8 /scratch.global/diazo005/CMY_contigs/all_CMY_contigs.fa CMY_genomad_output genomad_db >> genomad_CMY.log 2>&1
+	genomad end-to-end --cleanup --splits 8 /scratch.global/diazo005/CMY_unclass_contigs/all_CMY_unclass_contigs.fa CMY_unclass_genomad_output genomad_db >> genomad_CMY_unclass.log 2>&1
+# Since I didn't find any plasmids or virus, I ran the "relaxed" option of genomad 
+	mkdir relaxed
+	cd /scratch.global/diazo005/genomad/relaxed
+	genomad end-to-end --cleanup --splits 8 --relaxed /scratch.global/diazo005/CMY_contigs/all_CMY_contigs.fa CMY_genomad_output ../genomad_db >> genomad_CMY.log 2>&1
+	genomad end-to-end --cleanup --splits 8 --relaxed /scratch.global/diazo005/CMY_unclass_contigs/all_CMY_unclass_contigs.fa CMY_unclass_genomad_output ../genomad_db >> genomad_CMY_unclass.log 2>&1
+# Results were saved at 
+	/scratch.global/diazo005/genomad/CMY_genomad_output
+	/scratch.global/diazo005/genomad/CMY_unclass_genomad_output
+# They were copied to local machine at
+	/Users/gerardodiaz/Desktop/Gerardo/UMN/Side_projects/TexasTech_resistome/genomad_results
+
+#
+##
+###
+####
+##### RUNNING MOBFINDER
+####
+###
+##
+#
+# Reference: https://github.com/FengTaoSMU/MOBFinder
+
+# Conda env install
+	conda create -n mobfinder
+	conda activate mobfinder
+	conda install python
+	conda install biopython
+	conda install -c etetoolkit ete3
+	conda install pycurl
+	conda install r-base
+	conda install r-randomforest
+	conda install -c bioconda blast
+	conda install numpy
+# Git cloning installation
+	mkdir mobfinder
+	cd /scratch.global/diazo005/mobfinder
+	git clone https://github.com/FengTaoSMU/MOBFinder.git
+	cd MOBFinder
+# Download the model manually from https://zenodo.org/records/13368995 (click on "Download all")
+# Put the 4 model files in the "model" folder at the server, using sftp transfer
+# Run MOBFinder
+	cd /scratch.global/diazo005/mobfinder/MOBFinder
+	python3 MOBFinder.py -i /scratch.global/diazo005/CMY_contigs/all_CMY_contigs.fa -o ./ >> MOBFinder_CMY.log 2>&1
+	python3 MOBFinder.py -i /scratch.global/diazo005/CMY_unclass_contigs/all_CMY_unclass_contigs.fa -o ./ >> MOBFinder_CMY_unclass.log 2>&1
+# Results were saved at
+	/scratch.global/diazo005/mobfinder/MOBFinder/all_CMY_contigs_mobfinder_result.tsv
+	/scratch.global/diazo005/mobfinder/MOBFinder/all_CMY_unclass_contigs_mobfinder_result.tsv
+# Results were copied to local machine at
+	/Users/gerardodiaz/Desktop/Gerardo/UMN/Side_projects/TexasTech_resistome/mobfinder_results
+	
+#
+##
+###
+####
+##### RUNNING QUAST (for contig assembly quality assessment)
+####
+###
+##
+# Reference: https://quast.sourceforge.net/docs/manual.html 
+#	
+# Loading quast from server
+	module load quast
+# I will use the folloqing concatenated fasta files that contain all the contigs that harbor CMY genes with and without taxonomic classification
+	/scratch.global/diazo005/CMY_contigs/all_CMY_contigs.fa
+	/scratch.global/diazo005/CMY_unclass_contigs/all_CMY_unclass_contigs.fa
+# Running quast 
+	quast.py /scratch.global/diazo005/CMY_contigs/all_CMY_contigs.fa --min-contig 0 -o quast_CMY_contigs
+	quast.py /scratch.global/diazo005/CMY_unclass_contigs/all_CMY_unclass_contigs.fa --min-contig 0 -o quast_CMY_unclass_contigs
+# Moving results to local. NOTE that the the most important file is "report.txt"
+	cd /scratch.global/diazo005
+	get -R quast_CMY_contigs
+	get -R quast_CMY_unclass_contigs
+
+
+#
+##
+###
+####
+##### AMR++ re-run (01/25/26): ONLY RESISTOME ANALYSIS
+####
+###
+##
+# 
+# Motivation: Re-analysis to get the non-dedup results and double check the on-target reads proportion (classified reads/total)
+# DATA address: /scratch.global/fermx014/data/diazo005/Noyes_Project_054
+# Working directory: /scratch.global/fermx014/data/diazo005/AMRplusplus
+## 1.start new tmux session called "texas"
+	tmux new -s texas 
+	### DEATTACH:
+		ctrl+b and press d 
+	### SEE SESSIONS RUNNING
+		tmux ls
+	### ATTACH again session called "rumen"
+		tmux a -t rumen 
+## 2. Cloning the AMR++ repository
+	module load git
+	git --version
+	git clone https://github.com/Microbial-Ecology-Group/AMRplusplus.git   # Will download in current working directory
+## 3. Install environments
+	conda env create -f envs/AMR++_env.yaml
+	conda activate AMR++_env
+## 4. modify line 21 of code to fix a bug 
+	cd /scratch.global/fermx014/data/diazo005/AMRplusplus/modules/Resistome
+	nano resistome.nf
+	# Change line 21 from
+	tag { dl_dependencies }
+	# to
+	tag { "dl_dependencies" }
+	# close and save
+	CTRL + x
+	Yes
+## 5. modify line 132 of code to fix a bug
+	cd /scratch.global/fermx014/data/diazo005/AMRplusplus/modules/Alignment
+	nano bwa.nf
+	# Change line 132 from
+	tag { sample_id }
+	# to 
+	tag { host_rm_stats.baseName }
+	# Close and save
+## 5. Navigate into working directory 
+	cd /scratch.global/fermx014/data/diazo005/AMRplusplus
+## 6. Run standard_AMR workflow making a little change to maximum threads that trimmomatic can use
+	_JAVA_OPTIONS="-Xmx128G" \
+	nextflow run main_AMR++.nf \
+	-profile conda \
+	-w work_temp \
+	--pipeline standard_AMR \
+	--reads '/scratch.global/fermx014/data/diazo005/Noyes_Project_054/*_R{1,2}_001.fastq.gz' \
+	--host /common/bioref/ensembl/main/Bos_taurus-110/ARS-UCD1.2/seq \
+	--threads 20 \
+	--output output_texastech \
+	--snp Y \
+	-resume
+## 7.enjoy!
+## 8. Final screen:
+	Pipeline completed!
+	Started at  2026-01-26T14:24:08.497163190-06:00
+	Finished at 2026-01-26T21:18:11.119921141-06:00
+	Time elapsed: 6h 54m 3s
+	Execution status: OK
+	Completed at: 26-Jan-2026 21:18:11
+	Duration    : 6h 54m 2s
+	CPU hours   : 211.3 (71.7% cached)
+	Succeeded   : 281
+	Cached      : 546
+
+#
+##
+###
+####
+##### CACULATING DUPLICATION AND ON-TARGET RATES WITH SAMTOOLS
+####
+###
+##
+#
+## 1. Count multiple alignment of ARGs because non-deduped count matrix has more hits than raw reads. I used Enrique's script "alignment_analyzer.py" (check email diazo005 for details)
+## 1.1. Counting multiple alignment in non-deduped data
+	# go to correct node
+	ssh acn23
+	# install pysam to run alignment_analyzer.py
+	conda create -n pysam
+	source activate pysam
+	conda config --add channels bioconda
+	conda install pysam
+	pysam --help
+	conda deactivate
+	# Go where BAM files are
+	cd /scratch.global/fermx014/data/diazo005/AMRplusplus/output_texastech/Alignment/BAM_files/Standard
+	# Copy Enrique's script ("alignment_analyzer.py") to folder
+	cp ../alignment_analyzer.py .
+	# Make directory needed to run it
+	mkdir counts
+	# start tmux session
+	tmux new -s texas
+	# Activate pysam env with conda
+	source activate pysam
+	# Run script in a loop for all BAM files in the folder
+for bam in *_alignment_sorted.bam; do
+    base=$(basename "$bam" "_alignment_sorted.bam")
+
+    python3 alignment_analyzer.py \
+        -i "$bam" \
+        -r "counts/${base}_per_read.tsv" \
+        -g "counts/${base}_gene_summary.tsv" \
+		--sample-id "$base" \
+		--min-mapq 0 \
+        --count-mode alignment \
+        --min-gene-fraction 0.8 \
+        --include-supplementary \
+        --cigar-aware-coverage \
+		--coverage-output "counts/${base}_coverage_stats.tsv"
+done
+
+## 1.2. Counting multiple alignment in deduped data
+	# Go where BAM files are
+	cd /scratch.global/fermx014/data/diazo005/AMRplusplus/output_texastech/Alignment/BAM_files/Deduped
+	# Copy Enrique's script ("alignment_analyzer.py") to folder
+	cp ../alignment_analyzer.py .
+	# Make directory needed to run it
+	mkdir counts
+	# start tmux session
+	tmux new -s texas2
+	# Activate pysam env with conda
+	source activate pysam
+	# Run script in a loop for all BAM files in the folder
+for bam in *_alignment_dedup.bam; do
+    base=$(basename "$bam" "_alignment_dedup.bam")
+
+    python3 alignment_analyzer.py \
+        -i "$bam" \
+        -r "counts/${base}_per_read.tsv" \
+        -g "counts/${base}_gene_summary.tsv" \
+		--sample-id "$base" \
+		--min-mapq 0 \
+        --count-mode alignment \
+        --min-gene-fraction 0.8 \
+        --include-supplementary \
+        --cigar-aware-coverage \
+		--coverage-output "counts/${base}_coverage_stats.tsv"
+done
+
+## Since none of these actually worked for our purposes, Noelle decided to use samtools to calculate duplication and on-target rates.
+## The workflow for this analysis is: 
+	# 1. Use as input the BAM files produced from the alignment of non-host reads to MEGARESV3 using AMR++v3 with default settings
+	# 2. Use samtools to obtain alignment stats of BAM files after being sorted (by name and coordinate) and duplicate-marked. The workflow is: fixmate --> sort --> markdup --> flagstat
+	module load samtools
+	## 2.1. Testing samtools commands (fixmate, sort, markdup & flagstat) using one file
+	samtools fixmate -@ 20 -m 9406D14TT39_S74_alignment_sorted.bam fixmate.bam
+	samtools sort -@ 20 fixmate.bam -o positionsort.bam 
+	samtools markdup -@ 20 positionsort.bam markdup.bam
+	samtools flagstat -@ 20 markdup.bam
+	## Note that markdup.bam is the key file to produce alignment stats.
+	## This is the ouput of flagstat in sorted and duplicate-marked files
+	samtools flagstat -@ 20 markdup.bam
+		# 66780984 + 0 in total (QC-passed reads + QC-failed reads)
+		# 66181302 + 0 primary
+		# 0 + 0 secondary
+		# 599682 + 0 supplementary
+		# 27956258 + 0 duplicates
+		# 27956258 + 0 primary duplicates
+		# 48480351 + 0 mapped (72.60% : N/A)
+		# 47880669 + 0 primary mapped (72.35% : N/A)
+		# 66181302 + 0 paired in sequencing
+		# 33090651 + 0 read1
+		# 33090651 + 0 read2
+		# 44039322 + 0 properly paired (66.54% : N/A)
+		# 46336972 + 0 with itself and mate mapped
+		# 1543697 + 0 singletons (2.33% : N/A)
+		# 2281010 + 0 with mate mapped to a different chr
+		# 1020932 + 0 with mate mapped to a different chr (mapQ>=5)
+	## 2.2. Ran flagstats in the same BAM file without sorting and marking duplicates (no fixmate, sort and markdup). This is what I obtained ONLY FOR COMPARISON PURPOSES
+	samtools flagstat 9406D5TT38_S63_alignment_sorted.bam
+		# 66780984 + 0 in total (QC-passed reads + QC-failed reads)
+		# 66181302 + 0 primary
+		3 0 + 0 secondary
+		# 599682 + 0 supplementary
+		# 0 + 0 duplicates
+		# 0 + 0 primary duplicates
+		# 48480351 + 0 mapped (72.60% : N/A)
+		# 47880669 + 0 primary mapped (72.35% : N/A)
+		# 66181302 + 0 paired in sequencing
+		# 33090651 + 0 read1
+		# 33090651 + 0 read2
+		# 44039322 + 0 properly paired (66.54% : N/A)
+		# 46336972 + 0 with itself and mate mapped
+		# 1543697 + 0 singletons (2.33% : N/A)
+		# 2281010 + 0 with mate mapped to a different chr
+	## 2.3. Run a bash script to loop through BAM alignments in the Standard (non-deduped) BAM files folder. The script will output a table with aligment stats for every sorted and duplicate-marked BAM file
+	nano process_bams.sh
+################# script starts down here ###################
+
+#!/bin/bash
+
+# Folder containing input BAMs
+input_folder="/scratch.global/fermx014/data/diazo005/AMRplusplus/output_texastech/Alignment/BAM_files/Standard"
+
+# Output folder
+output_folder="results"
+mkdir -p "$output_folder"
+
+# Number of threads
+threads=20
+
+# Temporary list of flagstat files
+flagstat_files=()
+
+# ----------------------------
+# Step 1-4: Process BAM files
+# ----------------------------
+for bam in "$input_folder"/*.bam; do
+    base=$(basename "$bam" .bam)
+    echo "Processing $base..."
+
+    # Step 1: fixmate
+    fixmate_bam="$output_folder/${base}_fixmate.bam"
+    samtools fixmate -@ $threads -m "$bam" "$fixmate_bam"
+
+    # Step 2: sort by position (multithreaded)
+    positionsort_bam="$output_folder/${base}_positionsort.bam"
+    samtools sort -@ $threads -o "$positionsort_bam" "$fixmate_bam"
+
+    # Step 3: mark duplicates (multithreaded)
+    markdup_bam="$output_folder/${base}_markdup.bam"
+    samtools markdup -@ $threads "$positionsort_bam" "$markdup_bam"
+
+    # Step 4: flagstat
+    flagstat_txt="$output_folder/${base}_flagstat.txt"
+    samtools flagstat -@ $threads "$markdup_bam" > "$flagstat_txt"
+
+    flagstat_files+=("$flagstat_txt")
+
+    echo "Finished $base"
+done
+
+# ----------------------------
+# Step 5: Combine flagstat into TSV
+# ----------------------------
+# Output TSV
+combined_tsv="$output_folder/combined_flagstat.tsv"
+
+# Header row (matching the lines you want from flagstat)
+echo -e "Sample\tin_total\tprimary\tsecondary\tsupplementary\tduplicates\tprimary_duplicates\tmapped\tprimary_mapped\tpaired_in_sequencing\tread1\tread2\tproperly_paired\twith_itself_and_mate_mapped\tsingletons\twith_mate_mapped_to_diff_chr\twith_mate_mapped_to_diff_chr_mapQ5" > "$combined_tsv"
+
+# Loop over flagstat files
+for f in "${flagstat_files[@]}"; do
+    sample=$(basename "$f" _flagstat.txt)
+    # Extract first numbers from each line and put in one row
+    # Only first number before " + "
+    counts=$(awk '{print $1}' "$f" | paste -sd "\t" -)
+    echo -e "${sample}\t${counts}" >> "$combined_tsv"
+done
+
+echo "All flagstat files combined into $combined_tsv"
+
+################# script ends up here ###################
+
+
+	module load samtools
+	chmod +x process_bams.sh
+	./process_bams.sh
+	
+	## 2.4. Run a bash script to loop through BAM alignments in the Deduped BAM files folder. The script will output a table with aligment stats for every deduplicated file
+	nano process_dedup_bams.sh
+################# script starts down here ###################
+
+#!/bin/bash
+
+# Folder containing input BAMs
+input_folder="/scratch.global/fermx014/data/diazo005/AMRplusplus/output_texastech/Alignment/BAM_files/Deduped"
+
+# Output folder
+output_folder="results"
+mkdir -p "$output_folder"
+
+# Number of threads
+threads=20
+
+# Temporary list of flagstat files
+flagstat_files=()
+
+# ----------------------------
+# Step 1-4: Process BAM files
+# ----------------------------
+for bam in "$input_folder"/*.bam; do
+    base=$(basename "$bam" .bam)
+    echo "Processing $base..."
+
+    # No need to do Steps 1, 2, 3
+	
+    # Step 4: flagstat
+    flagstat_txt="$output_folder/${base}_flagstat.txt"
+    samtools flagstat -@ $threads "$bam" > "$flagstat_txt"
+
+    flagstat_files+=("$flagstat_txt")
+
+    echo "Finished $base"
+done
+
+# ----------------------------
+# Step 5: Combine flagstat into TSV
+# ----------------------------
+# Output TSV
+combined_tsv="$output_folder/combined_flagstat.tsv"
+
+# Header row (matching the lines you want from flagstat)
+echo -e "Sample\tin_total\tprimary\tsecondary\tsupplementary\tduplicates\tprimary_duplicates\tmapped\tprimary_mapped\tpaired_in_sequencing\tread1\tread2\tproperly_paired\twith_itself_and_mate_mapped\tsingletons\twith_mate_mapped_to_diff_chr\twith_mate_mapped_to_diff_chr_mapQ5" > "$combined_tsv"
+
+# Loop over flagstat files
+for f in "${flagstat_files[@]}"; do
+    sample=$(basename "$f" _flagstat.txt)
+    # Extract first numbers from each line and put in one row
+    # Only first number before " + "
+    counts=$(awk '{print $1}' "$f" | paste -sd "\t" -)
+    echo -e "${sample}\t${counts}" >> "$combined_tsv"
+done
+
+echo "All flagstat files combined into $combined_tsv"
+
+################# script ends up here ###################
+
+	module load samtools
+	chmod +x process_dedup_bams.sh
+	./process_dedup_bams.sh
+
+	# 3. Formula for non-host duplicate rate
+	Numerator == number of duplicate reads (from flagstat "duplicates")
+	Denominator == total non-host reads.
+	# 4. Formula for on-target rate
+	Numerator == number of reads that aligned to MEGARES3 (from flagstat "primary mapped")
+	Denominator == total reads (host and non-host)
