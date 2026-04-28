@@ -12,3 +12,6 @@ This repository contains the code for bioinformatic and R analysis of the paper 
 2. TexasTech_bioinfo.txt: txt file used for the bioinformatic analysis of 16S microbiome (Dada2), resistome (AMR++), genomic contextualization analysis (host reads decontamination, MGIP, Genomad, MOBfinder, duplication and on-target read calculations).
 3. TexasTech_Microbiome.md: Markdown file used for the microbiome analysis in R. Remember to change file extension "md" to "Rmd" before using it.
 4. TexasTech_primer_remove.md: Markdown file used only for removing primers in R, BEFORE microbiome analysis. Remember to change file extension "md" to "Rmd" before using it.
+# WARNING
+Check software versions, paths and dependencies because they may have changed. Keep in mind that this code was adapted to my particular needs. If you need help with it please email me diazo005@umn.edu. 
+Welcome!
